@@ -2,6 +2,8 @@
 
 **THIS SCRIPT DOES NOT CURRENTLY WORK!**
 
+Tl;dr: this is an attempt to create a decompressor for lcn2kai SD card files. My script isn't working, but I believe with help from others we can figure it out.
+
 
 ## Background
 
