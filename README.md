@@ -4,6 +4,9 @@
 
 Tl;dr: this is an attempt to create a decompressor for lcn2kai SD card files. My script isn't working, but I believe with help from others we can figure it out.
 
+**UPDATE:** Several months later (December 2021) I've made another attempt at figuring out the decompression method. Unfortunately the script still doesn't work, although I have corrected a couple of mistakes from my previous effort.
+
+At the moment, the script can successfully unpack the first 35 bytes of the PNG data (i.e. the PNG signature followed by the `IDHR` chunk, with an accurate CRC32). As before, things then start to go wrong until an exception is raised, so there's probably an incorrect value somewhere...
 
 ## Background
 
@@ -128,7 +131,7 @@ Offset(h) 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
 00000060  A1 DB E1 0F 58 E4 3E 89 50 4E 47 0D 0A 1A 0A 00  ¡Ûá.Xä>‰PNG.....
 00000070  00 00 0D 49 48 44 52 F0 E0 08 02 B2 E1 7C 5E 00  ...IHDRðà..²á|^.
 00000080  01 73 52 47 42 00 AE CE 1C E9 06 62 4B 47 44 00  .sRGB.®Î.é.bKGD.
-00000090  FF A0 BD A7 93 09 70 48 59 73 0B 11 01 7F 64 5F  ÿ ½§“.pHYs....d_
+00000090  FF A0 BD A7 93 09 70 48 59 73 0B 11 01 7F 64 5F  ÿ ½§“.pHYs....d_
 000000A0  91 07 74 49 4D 45 07 E0 02 18 07 16 0E CB 92 13  ‘.tIME.à.....Ë’.
 000000B0  67 B6 49 44 41 54 78 DA ED D2 C1 0D 04 00 31 C4  g¶IDATxÚíÒÁ...1Ä
 000000C0  FE 2B 33 83 AF B4 23 5C 2E A7 27 E0 8B 92 00 43  þ+3ƒ¯´#\.§'à‹’.C
