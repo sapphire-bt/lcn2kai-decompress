@@ -1,12 +1,12 @@
 # lcn2kai-decompress
 
-**THIS SCRIPT DOES NOT CURRENTLY WORK!**
+~~**THIS SCRIPT DOES NOT CURRENTLY WORK!**~~
 
-Tl;dr: this is an attempt to create a decompressor for lcn2kai SD card files. My script isn't working, but I believe with help from others we can figure it out.
+**THIS SCRIPT ONLY PARTIALLY WORKS!**
 
-**UPDATE:** Several months later (December 2021) I've made another attempt at figuring out the decompression method. Unfortunately the script still doesn't work, although I have corrected a couple of mistakes from my previous effort.
+**UPDATE 2:** After fixing what now seems like a very obvious mistake, this script is now working for small files. Larger files appear to be segmented into blocks and have slightly different headers, but hopefully most of the difficult work is done now.
 
-At the moment, the script can successfully unpack the first 35 bytes of the PNG data (i.e. the PNG signature followed by the `IHDR` chunk, with an accurate CRC32). As before, things then start to go wrong until an exception is raised, so there's probably an incorrect value somewhere...
+**UPDATE 1:** Several months later I've made another attempt at figuring out the decompression method. Unfortunately the script still doesn't work, although I have corrected a couple of mistakes from my previous effort.
 
 ## Background
 
