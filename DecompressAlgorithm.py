@@ -4,24 +4,35 @@ import sys
 
 class DecompressAlgorithm():
 	def __init__(self):
-		self.code_table_list    = CodeTableList()
-		self.curr_dword         = 0
-		self.file_pointer       = 0
-		self.write_address      = 0
-		self.curr_dword_bit_pos = 0
-		self.dword_remainder    = 0
-		self.unknown_9          = 0
-		self.unknown_10         = 0
-		self.unknown_11         = 0
-		self.unknown_12         = 0
+		self.code_table_list   = CodeTableList()
+		self.file_pointer      = 0
+		self.write_address     = 0
+		self.dword_remainder   = 0
+		self.unknown_9         = 0
+		self.unknown_10        = 0
+		self.unknown_11        = 0
+		self.unknown_12        = 0
 
 		# Assigned in decompress()
 		self.stream        = None
 		self.stream_data   = None
 		self.unpacked_data = None
 
+		self.curr_dword_bit_pos = 0
+		self.curr_dword         = 0
+
+	def dump(self, file_path, file_ext = ".png"):
+		with open(os.path.basename(file_path) + file_ext, "wb") as f:
+			f.write(bytearray(self.unpacked_data))
+
 	def unpack(self, f, b):
 		return struct.unpack(f, b)[0]
+
+	def get_uint16(self):
+		return self.unpack("<H", self.stream.read(2))
+
+	def get_uint32(self):
+		return self.unpack("<I", self.stream.read(4))
 
 	def decompress(self, file_path):
 		self.stream = open(file_path, "rb")
@@ -29,11 +40,12 @@ class DecompressAlgorithm():
 
 		self.stream.seek(0)
 
-		version   = self.unpack("<H", self.stream.read(2))
-		unknown   = self.unpack("<H", self.stream.read(2)) # Always seems to be 16 (apparently can't exceed 64)
+		version   = self.get_uint16()
+		unknown   = self.get_uint16() # Always seems to be 16 (apparently can't exceed 64)
 		signature = self.stream.read(8).decode()
 
-		size_uncompressed = self.unpack("<I", self.stream.read(4))
+		# Not sure about this
+		size_uncompressed = self.get_uint32()
 		self.unpacked_data = [0x00] * size_uncompressed
 
 		if version != 5:
@@ -47,27 +59,29 @@ class DecompressAlgorithm():
 
 		self.stream.seek(0x14)
 
-		header_size = self.unpack("<I", self.stream.read(4))
+		header_size = self.get_uint32()
 
 		self.stream.seek(header_size)
 
 		# Read first four bytes of input file into memory for u32_get_next_bits method
-		self.curr_dword = self.unpack("<I", self.stream.read(4))
+		self.curr_dword = self.get_uint32()
 
 		# cpr_tclDecompressAlgorithm::u32GetNextBits always returns a uint32 (hence the name) so shift off two bytes
 		packed_data_size = self.u32_get_next_bits(16) >> 16
 		unknown_word = self.u32_get_next_bits(16) >> 16
 
-		# 0xFC063554
-		info_dword = self.u32_get_next_bits(32)
+		# Read first four bytes of unpacking info bytes
+		info_bytes = self.u32_get_next_bits(32)
 
-		# cpr_tclDecompressAlgorithm::vInterpreteHeader
-		self.file_pointer = self.stream.seek(header_size) + packed_data_size
+		# As in cpr_tclDecompressAlgorithm::vInterpreteHeader, these properties
+		# are set to the first two WORDs preceding the packed data.
+		# self.file_pointer is the offset of the section beginning AFTER the packed data
+		self.file_pointer = header_size + packed_data_size
 		self.unknown_12 = unknown_word
 
-		code_table = self.code_table_list.code_tables[info_dword & 3]
+		code_table = self.code_table_list.code_tables[info_bytes & 3]
 
-		info_dword >>= 2
+		info_bytes >>= 2
 
 		num_bits = 2
 
@@ -79,17 +93,14 @@ class DecompressAlgorithm():
 		while 1:
 			while 1:
 				# cpr_tclCodeTable::iu32SearchIndexOfCode
-				entry_index = code_table.entry_3[info_dword & code_table.entry_4]
+				entry_index = code_table.entry_3[info_bytes & code_table.entry_4]
 
 				# cpr_tclCodeTable::corfoGetCodeEntry
 				code_entry = code_table.entry_1[entry_index]
 
 				num_bits += code_entry.u8_0
 
-				info_dword >>= code_entry.u8_0
-
-				print()
-				print("CMD TYPE:", code_entry.cmd_type)
+				info_bytes >>= code_entry.u8_0
 
 				if code_entry.cmd_type != 3:
 					break
@@ -97,72 +108,64 @@ class DecompressAlgorithm():
 				# cmd type 3: copy bytes from the allocated memory into itself at a different address
 				next_bits = self.u32_get_next_bits(num_bits)
 
-				more_bits = next_bits | info_dword
+				info_bytes |= next_bits
 
-				something = more_bits & ((1 << code_entry.u8_1) - 1)
+				# number of bytes to copy
+				amt_to_copy = code_entry.u16_1 + (info_bytes & ((1 << code_entry.u8_1) - 1))
 
-				amt_to_copy = something + code_entry.u16_1
+				info_bytes >>= code_entry.u8_1
 
-				v33 = more_bits >> code_entry.u8_1
+				# backwards offset from current position in output buffer
+				offset = -(code_entry.u16_3 + ((info_bytes & ((1 << code_entry.u8_2) - 1)) << self.unknown_11))
 
-				offset = -(code_entry.u16_3 + ((v33 & ((1 << code_entry.u8_2) - 1)) << self.unknown_11))
+				info_bytes >>= code_entry.u8_2
 
 				bytes_to_copy = self.unpacked_data[self.write_address + offset:self.write_address + offset + amt_to_copy]
 
-				print("copying", amt_to_copy, "bytes")
-				print("offset", self.write_address, "+", offset, "=", self.write_address + offset)
-				print("bytes_to_copy:", [hex(b) for b in bytes_to_copy])
-
 				for b in bytes_to_copy:
-					self.unpacked_data[self.write_address] = b
-					self.write_address += 1
+					try:
+						self.unpacked_data[self.write_address] = b
+						self.write_address += 1
+					except Exception as e:
+						self.dump(file_path)
+						raise e
 
 				num_bits = code_entry.u8_2 + code_entry.u8_1
 
-				info_dword = v33 >> code_entry.u8_2
-
 			# cmd type 2: copy bytes from the input file into the allocated memory
 			if code_entry.cmd_type == 2:
-				next_bits = self.u32_get_next_bits(num_bits) # in first iteration, reads a byte: 0x38 (as 0x00000038)
+				next_bits = self.u32_get_next_bits(num_bits)
+
+				info_bytes |= next_bits
+
+				amt_to_copy = code_entry.u16_1 + (info_bytes & ((1 << code_entry.u8_1) - 1))
+
+				info_bytes >>= code_entry.u8_1
 
 				num_bits = code_entry.u8_1
 
-				more_bits = next_bits | info_dword
-
-				something = more_bits & ((1 << num_bits) - 1)
-
-				amt_to_copy = something + code_entry.u16_1
-
-				info_dword = more_bits >> num_bits
-
-				# Copy bytes into allocated memory
 				bytes_to_copy = self.stream_data[self.file_pointer:self.file_pointer + amt_to_copy]
 
-				print("copying", amt_to_copy, "bytes")
-				print("bytes_to_copy:", [hex(b) for b in bytes_to_copy])
-
 				for b in bytes_to_copy:
-					self.unpacked_data[self.write_address] = b
-					self.write_address += 1
-					self.file_pointer += 1
+					try:
+						self.unpacked_data[self.write_address] = b
+						self.write_address += 1
+						self.file_pointer += 1
+					except Exception as e:
+						self.dump(file_path)
+						raise e
 
 			# cmd type 1: copy one byte from the input file to the allocated memory
 			else:
 				try:
-					print("copying", 1, "byte")
-					print("bytes_to_copy:", [hex(ord(self.stream_data[self.file_pointer:self.file_pointer + 1]))])
-
 					self.unpacked_data[self.write_address] = ord(self.stream_data[self.file_pointer:self.file_pointer + 1])
 					self.write_address += 1
 					self.file_pointer += 1
 				except Exception as e:
-					with open("_dump.png", "wb") as f:
-						f.write(bytearray(self.unpacked_data))
+					self.dump(file_path)
 					raise e
 
 	def u32_get_next_bits(self, n):
-		print("getting", n, "bits")
-
 		if n <= 0:
 			raise Exception("Not enough bits")
 
@@ -173,9 +176,9 @@ class DecompressAlgorithm():
 
 		if curr_dword_bit_pos:
 			# determines whether or not [at least] the rest of curr_dword is being returned
-			some_bool = n >= 32 - curr_dword_bit_pos # e.g. 16 >= (32 - 16) = 16 >= 16 = true
+			some_bool = n >= 32 - curr_dword_bit_pos
 
-			if n <= 32 - curr_dword_bit_pos: # 16 <= (32 - 16) = 16 <= 16 = true
+			if n <= 32 - curr_dword_bit_pos:
 				dword_remainder = self.dword_remainder
 
 				if n >= 32 - curr_dword_bit_pos:
@@ -206,33 +209,23 @@ class DecompressAlgorithm():
 
 				dword_remainder = self.dword_remainder
 
-				self.curr_dword = self.unpack("<I", self.stream.read(4))
+				self.curr_dword = self.get_uint32()
 				self.dword_remainder = v15
 
 				next_bits = v14 | (dword_remainder >> some_bits)
 
 		else:
-			dword_requested = n == 32
-
 			if n == 32:
 				next_bits = self.curr_dword
-
-				next_dword = self.unpack("<I", self.stream.read(4))
+				self.curr_dword = self.get_uint32()
 
 			else:
-				next_dword = self.unpack("<I", self.stream.read(4))
-
 				remaining_dword_bits = 32 - n
 
 				next_bits = 0xFFFFFFFF & (self.curr_dword << remaining_dword_bits)
 
 				self.dword_remainder = self.curr_dword ^ (next_bits >> remaining_dword_bits)
-
-			if dword_requested:
-				self.curr_dword = next_dword
-
-			else:
-				self.curr_dword = next_dword
+				self.curr_dword = self.get_uint32()
 				self.curr_dword_bit_pos = n
 
 		return next_bits
@@ -381,15 +374,15 @@ class CodeTable():
 class CodeTableEntry():
 	# cpr_tclCodeTableEntry::vSetEntry
 	def __init__(self, *args):
-		self.u16_0    = args[1]
-		self.u16_1    = args[4]
-		self.u16_2    = args[5]
-		self.u16_3    = args[7]
-		self.u16_4    = args[8]
-		self.cmd_type = args[0]
-		self.u8_0     = args[2]
-		self.u8_1     = args[3]
-		self.u8_2     = args[6]
+		self.u16_0    = args[1] # [0]
+		self.u16_1    = args[4] # [2]
+		self.u16_2    = args[5] # [4]
+		self.u16_3    = args[7] # [6]
+		self.u16_4    = args[8] # [8] - note the 2 byte gap here, not at the end of the struct!
+		self.cmd_type = args[0] # [12]
+		self.u8_0     = args[2] # [16]
+		self.u8_1     = args[3] # [18]
+		self.u8_2     = args[6] # [20]
 
 def main(argc, argv):
 	if argc < 2:
