@@ -4,7 +4,7 @@
 
 **THIS SCRIPT ONLY PARTIALLY WORKS!**
 
-**UPDATE 2:** After fixing what now seems like a very obvious mistake, this script is now working for small files. Larger files appear to be segmented into blocks and have slightly different headers, but hopefully most of the difficult work is done now.
+**UPDATE 2:** After fixing what now seems like a very obvious mistake, this script is now working for small files. Larger files appear to be segmented into blocks and have slightly different headers, but hopefully most of the difficult work is done now. In its current state, this script will run into an exception but successfully dump the decompressed file in the script directory.
 
 **UPDATE 1:** Several months later I've made another attempt at figuring out the decompression method. Unfortunately the script still doesn't work, although I have corrected a couple of mistakes from my previous effort.
 
