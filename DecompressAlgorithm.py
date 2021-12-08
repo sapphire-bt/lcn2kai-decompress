@@ -4,26 +4,30 @@ import sys
 
 class DecompressAlgorithm():
 	def __init__(self):
-		self.code_table_list   = CodeTableList()
-		self.file_pointer      = 0
-		self.write_address     = 0
-		self.dword_remainder   = 0
-		self.unknown_9         = 0
-		self.unknown_10        = 0
-		self.unknown_11        = 0
-		self.unknown_12        = 0
+		self.code_table_list = CodeTableList()
+		self.file_pointer       = 0
+		self.write_address      = 0
+		self.curr_dword_bit_pos = 0
+		self.curr_dword         = 0
+		self.dword_remainder    = 0
+		self.unknown_9          = 0
+		self.unknown_10         = 0
+		self.unknown_11         = 0
+		self.unknown_12         = 0
 
 		# Assigned in decompress()
 		self.stream        = None
 		self.stream_data   = None
 		self.unpacked_data = None
 
-		self.curr_dword_bit_pos = 0
-		self.curr_dword         = 0
+		self.blocks = []
+		self.curr_block = None
 
-	def dump(self, file_path, file_ext = ".png"):
+	def dump(self, file_path, file_ext = ".PNG"):
 		with open(os.path.basename(file_path) + file_ext, "wb") as f:
 			f.write(bytearray(self.unpacked_data))
+		self.stream.close()
+		exit()
 
 	def unpack(self, f, b):
 		return struct.unpack(f, b)[0]
@@ -44,9 +48,8 @@ class DecompressAlgorithm():
 		unknown   = self.get_uint16() # Always seems to be 16 (apparently can't exceed 64)
 		signature = self.stream.read(8).decode()
 
-		# Not sure about this
-		size_uncompressed = self.get_uint32()
-		self.unpacked_data = [0x00] * size_uncompressed
+		# Byte array for decompressed data
+		self.unpacked_data = bytearray(self.get_uint32())
 
 		if version != 5:
 			raise Exception(f"Invalid compression version (expected 5, got {version})")
@@ -57,27 +60,64 @@ class DecompressAlgorithm():
 		if signature != "CPRNAV_2":
 			raise Exception(f'Invalid signature (expected "CPRNAV_2", got "{signature}")')
 
+		# Bytes 0x10-0x13 always appear to be two ints:
+		#   0x0300, i.e. 3 - possibly the compression mode; 3 = compressed, 1 = uncompressed.
+		#   0x0100, i.e. 1 - no idea
 		self.stream.seek(0x14)
 
-		header_size = self.get_uint32()
+		first_block_offset = self.get_uint32()
 
-		self.stream.seek(header_size)
+		# After the standard header, one or more DWORDs follow which indicate block offsets.
+		# A "block" is a series of bytes which are used with a "reference list" for unpacking the actual data.
+		while self.stream.tell() < first_block_offset:
+			self.blocks.append(self.get_uint32())
+
+		# Read each block's unpacking data
+		for i in range(len(self.blocks)):
+			if i == 0:
+				block_start = self.stream.tell()
+			else:
+				block_start = self.blocks[i - 1]
+
+			block_end = self.blocks[i]
+
+			self.curr_block = bytearray(block_end - block_start)
+			self.stream.seek(block_start)
+
+			self.read_block(block_end)
+
+		print(f"Decompressed {file_path}")
+
+		# Save output
+		self.dump(file_path)
+
+	def read_block(self, block_end):
+		# Offset to this block's file data - updated below
+		data_begin = self.stream.tell()
 
 		# Read first four bytes of input file into memory for u32_get_next_bits method
 		self.curr_dword = self.get_uint32()
 
-		# cpr_tclDecompressAlgorithm::u32GetNextBits always returns a uint32 (hence the name) so shift off two bytes
-		packed_data_size = self.u32_get_next_bits(16) >> 16
-		unknown_word = self.u32_get_next_bits(16) >> 16
+		# cpr_tclDecompressAlgorithm::vInterpreteHeader
+		self.dword_remainder    = 0
+		self.curr_dword_bit_pos = 0
+
+		if len(self.unpacked_data) >= 0x10000:
+			unpacking_info_size = self.u32_get_next_bits(32)
+			self.unknown_12     = self.u32_get_next_bits(32)
+
+		# cpr_tclDecompressAlgorithm::u32GetNextBits always returns a uint32 (hence the name),
+		# so shift off two bytes if WORDs are used here instead of DWORDs.
+		else:
+			unpacking_info_size = self.u32_get_next_bits(16) >> 16
+			self.unknown_12     = self.u32_get_next_bits(16) >> 16
+
+		data_begin += unpacking_info_size
+
+		self.file_pointer = data_begin
 
 		# Read first four bytes of unpacking info bytes
 		info_bytes = self.u32_get_next_bits(32)
-
-		# As in cpr_tclDecompressAlgorithm::vInterpreteHeader, these properties
-		# are set to the first two WORDs preceding the packed data.
-		# self.file_pointer is the offset of the section beginning AFTER the packed data
-		self.file_pointer = header_size + packed_data_size
-		self.unknown_12 = unknown_word
 
 		code_table = self.code_table_list.code_tables[info_bytes & 3]
 
@@ -92,11 +132,17 @@ class DecompressAlgorithm():
 
 		while 1:
 			while 1:
+				if self.write_address == len(self.unpacked_data):
+					return
+
+				if self.file_pointer == block_end:
+					return
+
 				# cpr_tclCodeTable::iu32SearchIndexOfCode
 				entry_index = code_table.entry_3[info_bytes & code_table.entry_4]
 
 				# cpr_tclCodeTable::corfoGetCodeEntry
-				code_entry = code_table.entry_1[entry_index]
+				code_entry = code_table.reference_list[entry_index]
 
 				num_bits += code_entry.u8_0
 
@@ -123,12 +169,8 @@ class DecompressAlgorithm():
 				bytes_to_copy = self.unpacked_data[self.write_address + offset:self.write_address + offset + amt_to_copy]
 
 				for b in bytes_to_copy:
-					try:
-						self.unpacked_data[self.write_address] = b
-						self.write_address += 1
-					except Exception as e:
-						self.dump(file_path)
-						raise e
+					self.unpacked_data[self.write_address] = b
+					self.write_address += 1
 
 				num_bits = code_entry.u8_2 + code_entry.u8_1
 
@@ -144,26 +186,22 @@ class DecompressAlgorithm():
 
 				num_bits = code_entry.u8_1
 
+				# Compressed files appear to be padded to multiples of four, so don't copy any trailing null bytes
+				if len(self.unpacked_data) < self.write_address + amt_to_copy:
+					amt_to_copy = len(self.unpacked_data) - self.write_address
+
 				bytes_to_copy = self.stream_data[self.file_pointer:self.file_pointer + amt_to_copy]
 
 				for b in bytes_to_copy:
-					try:
-						self.unpacked_data[self.write_address] = b
-						self.write_address += 1
-						self.file_pointer += 1
-					except Exception as e:
-						self.dump(file_path)
-						raise e
+					self.unpacked_data[self.write_address] = b
+					self.write_address += 1
+					self.file_pointer += 1
 
 			# cmd type 1: copy one byte from the input file to the allocated memory
 			else:
-				try:
-					self.unpacked_data[self.write_address] = ord(self.stream_data[self.file_pointer:self.file_pointer + 1])
-					self.write_address += 1
-					self.file_pointer += 1
-				except Exception as e:
-					self.dump(file_path)
-					raise e
+				self.unpacked_data[self.write_address] = ord(self.stream_data[self.file_pointer:self.file_pointer + 1])
+				self.write_address += 1
+				self.file_pointer += 1
 
 	def u32_get_next_bits(self, n):
 		if n <= 0:
@@ -247,23 +285,23 @@ class CodeTableList():
 
 class CodeTable():
 	def __init__(self):
-		self.entry_0  = 0
-		self.entry_1  = 0
-		self.entry_2  = 0
-		self.entry_3  = 0
-		self.entry_4  = 0
-		self.entry_5  = 0
-		self.entry_6  = 0
-		self.entry_7  = 0
-		self.entry_8  = 0
-		self.entry_9  = 0
-		self.entry_10 = 0
+		self.entry_0        = 0
+		self.reference_list = 0
+		self.entry_2        = 0
+		self.entry_3        = 0
+		self.entry_4        = 0
+		self.entry_5        = 0
+		self.entry_6        = 0
+		self.entry_7        = 0
+		self.entry_8        = 0
+		self.entry_9        = 0
+		self.entry_10       = 0
 
 	# cpr_tclCodeTable::vSetStandardTable
 	def set_standard_table(self, table_type):
-		self.entry_0 = 9
-		self.entry_1 = self.get_entries(table_type)
-		self.entry_5 = 6
+		self.entry_0        = 9
+		self.reference_list = self.get_entries(table_type)
+		self.entry_5        = 6
 
 		if table_type == 0:
 			self.entry_6  = 16
@@ -351,7 +389,7 @@ class CodeTable():
 
 	# cpr_tclCodeTable::vUpdateReferenceList
 	def update_reference_list(self):
-		bits = max([entry.u8_0 for entry in self.entry_1])
+		bits = max([entry.u8_0 for entry in self.reference_list])
 
 		self.entry_4 = (1 << bits) - 1
 		self.entry_2 = 1 << bits
@@ -360,8 +398,8 @@ class CodeTable():
 		i = 0
 
 		while i < self.entry_0:
-			val_1 = self.entry_1[i].u8_0
-			val_2 = self.entry_1[i].u16_0
+			val_1 = self.reference_list[i].u8_0
+			val_2 = self.reference_list[i].u16_0
 			val_3 = 1 << val_1
 
 			while val_2 < self.entry_2:
