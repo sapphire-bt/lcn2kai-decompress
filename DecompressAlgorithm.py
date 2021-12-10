@@ -4,7 +4,7 @@ import sys
 
 class DecompressAlgorithm():
 	def __init__(self):
-		self.code_table_list = CodeTableList()
+		self.code_table_list    = CodeTableList()
 		self.file_pointer       = 0
 		self.write_address      = 0
 		self.curr_dword_bit_pos = 0
@@ -13,7 +13,7 @@ class DecompressAlgorithm():
 		self.unknown_9          = 0
 		self.unknown_10         = 0
 		self.unknown_11         = 0
-		self.unknown_12         = 0
+		self.block_allocation   = 0
 
 		# Assigned in decompress()
 		self.stream        = None
@@ -25,18 +25,23 @@ class DecompressAlgorithm():
 
 	def dump(self, file_path, file_ext = ".PNG"):
 		with open(os.path.basename(file_path) + file_ext, "wb") as f:
-			f.write(bytearray(self.unpacked_data))
+			f.write(self.unpacked_data)
 		self.stream.close()
-		exit()
 
 	def unpack(self, f, b):
 		return struct.unpack(f, b)[0]
 
 	def get_uint16(self):
-		return self.unpack("<H", self.stream.read(2))
+		if self.stream.tell() + 2 <= len(self.stream_data):
+			return self.unpack("<H", self.stream.read(2))
+
+		return 0
 
 	def get_uint32(self):
-		return self.unpack("<I", self.stream.read(4))
+		if self.stream.tell() + 4 <= len(self.stream_data):
+			return self.unpack("<I", self.stream.read(4))
+
+		return 0
 
 	def decompress(self, file_path):
 		self.stream = open(file_path, "rb")
@@ -102,15 +107,16 @@ class DecompressAlgorithm():
 		self.dword_remainder    = 0
 		self.curr_dword_bit_pos = 0
 
-		if len(self.unpacked_data) >= 0x10000:
-			unpacking_info_size = self.u32_get_next_bits(32)
-			self.unknown_12     = self.u32_get_next_bits(32)
+		# TO-DO: figure out when/why this is set (apparently it's not unpacked_data size being compared...)
+		if 0 and len(self.unpacked_data) >= 0x10000:
+			unpacking_info_size   = self.u32_get_next_bits(32)
+			self.block_allocation = self.u32_get_next_bits(32)
 
 		# cpr_tclDecompressAlgorithm::u32GetNextBits always returns a uint32 (hence the name),
 		# so shift off two bytes if WORDs are used here instead of DWORDs.
 		else:
-			unpacking_info_size = self.u32_get_next_bits(16) >> 16
-			self.unknown_12     = self.u32_get_next_bits(16) >> 16
+			unpacking_info_size   = self.u32_get_next_bits(16) >> 16
+			self.block_allocation = self.u32_get_next_bits(16) >> 16
 
 		data_begin += unpacking_info_size
 
@@ -133,9 +139,6 @@ class DecompressAlgorithm():
 		while 1:
 			while 1:
 				if self.write_address == len(self.unpacked_data):
-					return
-
-				if self.file_pointer == block_end:
 					return
 
 				# cpr_tclCodeTable::iu32SearchIndexOfCode
@@ -166,6 +169,9 @@ class DecompressAlgorithm():
 
 				info_bytes >>= code_entry.u8_2
 
+				if len(self.unpacked_data) < self.write_address + amt_to_copy:
+					amt_to_copy = len(self.unpacked_data) - self.write_address
+
 				bytes_to_copy = self.unpacked_data[self.write_address + offset:self.write_address + offset + amt_to_copy]
 
 				for b in bytes_to_copy:
@@ -173,6 +179,9 @@ class DecompressAlgorithm():
 					self.write_address += 1
 
 				num_bits = code_entry.u8_2 + code_entry.u8_1
+
+				if self.write_address % 0x4000 == 0:
+					return
 
 			# cmd type 2: copy bytes from the input file into the allocated memory
 			if code_entry.cmd_type == 2:
@@ -203,12 +212,15 @@ class DecompressAlgorithm():
 				self.write_address += 1
 				self.file_pointer += 1
 
+			if self.write_address % 0x4000 == 0:
+				return
+
 	def u32_get_next_bits(self, n):
 		if n <= 0:
-			raise Exception("Not enough bits")
+			raise Exception(f"not enough bits (requested {n})")
 
 		if n > 32:
-			raise Exception("Too many bits")
+			raise Exception(f"too many bits (requested {n})")
 
 		curr_dword_bit_pos = self.curr_dword_bit_pos
 
@@ -428,6 +440,9 @@ def main(argc, argv):
 		return 1
 
 	paths = argv[1:]
+
+	if paths[0] == "all":
+		paths = os.listdir(os.getcwd())
 
 	for file_path in paths:
 		print(f"reading file: {file_path}\n")
