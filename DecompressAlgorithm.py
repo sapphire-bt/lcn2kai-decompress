@@ -1,128 +1,168 @@
+import io
 import os
 import struct
 import sys
 
 class DecompressAlgorithm():
 	def __init__(self):
-		self.code_table_list    = CodeTableList()
-		self.file_pointer       = 0
-		self.write_address      = 0
+		self.reset()
+		self.code_table_list = CodeTableList()
+
+	def reset(self):
+		try:
+			self.stream.close()
+		except Exception as e:
+			self.stream = None
+
+		self.stream_data   = None
+		self.unpacked_data = None
+		self.unpacked_pos  = 0
+		self.blocks        = []
+		self.block_buffer  = None
+
+	def save_file(self, file_path, file_ext = ".PNG"):
+		with open(os.path.basename(file_path) + file_ext, "wb") as f:
+			f.write(self.unpacked_data)
+
+	def unpack(self, f, b):
+		return struct.unpack(f, b)[0]
+
+	def get_uint16(self, stream = None):
+		try:
+			if stream != None:
+				return self.unpack("<H", stream.read(2))
+
+			return self.unpack("<H", self.stream.read(2))
+		except Exception as e:
+			return 0
+
+	def get_uint32(self, stream = None):
+		try:
+			if stream != None:
+				return self.unpack("<I", stream.read(4))
+
+			return self.unpack("<I", self.stream.read(4))
+		except Exception as e:
+			return 0
+
+	def parse_header(self):
+		self.stream.seek(0)
+
+		version = self.get_uint16()
+
+		if version != 5:
+			raise Exception(f"Invalid compression version (expected 5, got {version})")
+
+		unknown = self.get_uint16() # Always seems to be 16 (apparently can't exceed 64)
+
+		if unknown > 64:
+			raise Exception(f"Invalid unknown value (expected <= 64, got {unknown})")
+
+		signature = self.stream.read(8).decode()
+
+		if signature != "CPRNAV_2":
+			raise Exception(f'Invalid signature (expected "CPRNAV_2", got "{signature}")')
+
+		self.unpacked_size = self.get_uint32()
+		self.unpacked_data = bytearray(self.unpacked_size)
+
+		# Bytes 0x10-0x13 always appear to be two ints:
+		#   0x0300, i.e. 3 - probably the compression mode; 3 = compressed, 1 = uncompressed.
+		#   0x0100, i.e. 1 - no idea
+		compression_mode = self.get_uint16()
+
+		if compression_mode != 3:
+			raise Exception(f"Invalid compression mode (expected 3, got {compression_mode})")
+
+		self.stream.seek(0x14)
+
+		# After the standard header, one or more DWORDs follow which indicate block offsets.
+		# A "block" is a series of bytes which are used with a "reference list" for unpacking the actual data.
+		first_block_offset = self.get_uint32()
+
+		blocks = []
+
+		while self.stream.tell() < first_block_offset:
+			blocks.append(self.get_uint32())
+
+		# Append the block ranges
+		for i in range(len(blocks)):
+			if i == 0:
+				block_start = self.stream.tell()
+			else:
+				block_start = blocks[i - 1]
+
+			block_end = blocks[i]
+
+			self.blocks.append((block_start, block_end,))
+
+	def decompress(self, file_path):
+		print(f"Reading file: {file_path}")
+
+		# Read in all file data
+		self.stream = open(file_path, "rb")
+		self.stream_data = self.stream.read()
+
+		# Read file header
+		self.parse_header()
+
+		# Unpack the blocks
+		for block in self.blocks:
+			unpacked_block = self.unpack_block(block)
+
+			# Put unpacked block data into main output byte array
+			for b in unpacked_block:
+				self.unpacked_data[self.unpacked_pos] = b
+				self.unpacked_pos += 1
+
+			while self.unpacked_pos % 0x4000 != 0 and self.unpacked_pos < self.unpacked_size:
+				self.unpacked_data[self.unpacked_pos] = 0x00
+				self.unpacked_pos += 1
+
+		print(f"Decompressed {file_path}")
+
+		# Save output
+		self.save_file(file_path)
+
+		self.reset()
+
+	def unpack_block(self, block):
 		self.curr_dword_bit_pos = 0
 		self.curr_dword         = 0
 		self.dword_remainder    = 0
 		self.unknown_9          = 0
 		self.unknown_10         = 0
 		self.unknown_11         = 0
-		self.block_allocation   = 0
 
-		# Assigned in decompress()
-		self.stream        = None
-		self.stream_data   = None
-		self.unpacked_data = None
+		file_pointer  = 0
+		write_address = 0
 
-		self.blocks = []
-		self.curr_block = None
+		block_start, block_end = block
 
-	def dump(self, file_path, file_ext = ".PNG"):
-		with open(os.path.basename(file_path) + file_ext, "wb") as f:
-			f.write(self.unpacked_data)
-		self.stream.close()
+		self.block_buffer = io.BytesIO(self.stream_data[block_start:block_end])
+		block_bytes  = self.block_buffer.read()
 
-	def unpack(self, f, b):
-		return struct.unpack(f, b)[0]
+		self.block_buffer.seek(0)
 
-	def get_uint16(self):
-		if self.stream.tell() + 2 <= len(self.stream_data):
-			return self.unpack("<H", self.stream.read(2))
-
-		return 0
-
-	def get_uint32(self):
-		if self.stream.tell() + 4 <= len(self.stream_data):
-			return self.unpack("<I", self.stream.read(4))
-
-		return 0
-
-	def decompress(self, file_path):
-		self.stream = open(file_path, "rb")
-		self.stream_data = self.stream.read()
-
-		self.stream.seek(0)
-
-		version   = self.get_uint16()
-		unknown   = self.get_uint16() # Always seems to be 16 (apparently can't exceed 64)
-		signature = self.stream.read(8).decode()
-
-		# Byte array for decompressed data
-		self.unpacked_data = bytearray(self.get_uint32())
-
-		if version != 5:
-			raise Exception(f"Invalid compression version (expected 5, got {version})")
-
-		if unknown > 64:
-			raise Exception(f"Invalid unknown value (expected <= 64, got {unknown})")
-
-		if signature != "CPRNAV_2":
-			raise Exception(f'Invalid signature (expected "CPRNAV_2", got "{signature}")')
-
-		# Bytes 0x10-0x13 always appear to be two ints:
-		#   0x0300, i.e. 3 - possibly the compression mode; 3 = compressed, 1 = uncompressed.
-		#   0x0100, i.e. 1 - no idea
-		self.stream.seek(0x14)
-
-		first_block_offset = self.get_uint32()
-
-		# After the standard header, one or more DWORDs follow which indicate block offsets.
-		# A "block" is a series of bytes which are used with a "reference list" for unpacking the actual data.
-		while self.stream.tell() < first_block_offset:
-			self.blocks.append(self.get_uint32())
-
-		# Read each block's unpacking data
-		for i in range(len(self.blocks)):
-			if i == 0:
-				block_start = self.stream.tell()
-			else:
-				block_start = self.blocks[i - 1]
-
-			block_end = self.blocks[i]
-
-			self.curr_block = bytearray(block_end - block_start)
-			self.stream.seek(block_start)
-
-			self.read_block(block_end)
-
-		print(f"Decompressed {file_path}")
-
-		# Save output
-		self.dump(file_path)
-
-	def read_block(self, block_end):
-		# Offset to this block's file data - updated below
-		data_begin = self.stream.tell()
-
-		# Read first four bytes of input file into memory for u32_get_next_bits method
-		self.curr_dword = self.get_uint32()
-
-		# cpr_tclDecompressAlgorithm::vInterpreteHeader
-		self.dword_remainder    = 0
-		self.curr_dword_bit_pos = 0
+		# Read first four bytes of block into for u32_get_next_bits method
+		self.curr_dword = self.get_uint32(self.block_buffer)
 
 		# TO-DO: figure out when/why this is set (apparently it's not unpacked_data size being compared...)
-		if 0 and len(self.unpacked_data) >= 0x10000:
-			unpacking_info_size   = self.u32_get_next_bits(32)
-			self.block_allocation = self.u32_get_next_bits(32)
+		if 0 and some_mystery_variable >= 0x10000:
+			unpack_info_size   = self.u32_get_next_bits(32)
+			unpacked_data_size = self.u32_get_next_bits(32)
 
 		# cpr_tclDecompressAlgorithm::u32GetNextBits always returns a uint32 (hence the name),
 		# so shift off two bytes if WORDs are used here instead of DWORDs.
 		else:
-			unpacking_info_size   = self.u32_get_next_bits(16) >> 16
-			self.block_allocation = self.u32_get_next_bits(16) >> 16
+			unpack_info_size   = self.u32_get_next_bits(16) >> 16
+			unpacked_data_size = 0x4000 - (self.u32_get_next_bits(16) >> 16)
 
-		data_begin += unpacking_info_size
+		unpacked_block = bytearray(unpacked_data_size)
 
-		self.file_pointer = data_begin
+		file_pointer = unpack_info_size
 
-		# Read first four bytes of unpacking info bytes
+		# Read first four bytes of unpacking info
 		info_bytes = self.u32_get_next_bits(32)
 
 		code_table = self.code_table_list.code_tables[info_bytes & 3]
@@ -138,8 +178,9 @@ class DecompressAlgorithm():
 
 		while 1:
 			while 1:
-				if self.write_address == len(self.unpacked_data):
-					return
+				if write_address == unpacked_data_size:
+					self.block_buffer.close()
+					return unpacked_block
 
 				# cpr_tclCodeTable::iu32SearchIndexOfCode
 				entry_index = code_table.entry_3[info_bytes & code_table.entry_4]
@@ -169,19 +210,17 @@ class DecompressAlgorithm():
 
 				info_bytes >>= code_entry.u8_2
 
-				if len(self.unpacked_data) < self.write_address + amt_to_copy:
-					amt_to_copy = len(self.unpacked_data) - self.write_address
+				# Compressed files appear to be padded to multiples of four, so don't copy any trailing null bytes.
+				if unpacked_data_size < write_address + amt_to_copy:
+					amt_to_copy = unpacked_data_size - write_address
 
-				bytes_to_copy = self.unpacked_data[self.write_address + offset:self.write_address + offset + amt_to_copy]
+				bytes_to_copy = unpacked_block[write_address + offset:write_address + offset + amt_to_copy]
 
 				for b in bytes_to_copy:
-					self.unpacked_data[self.write_address] = b
-					self.write_address += 1
+					unpacked_block[write_address] = b
+					write_address += 1
 
 				num_bits = code_entry.u8_2 + code_entry.u8_1
-
-				if self.write_address % 0x4000 == 0:
-					return
 
 			# cmd type 2: copy bytes from the input file into the allocated memory
 			if code_entry.cmd_type == 2:
@@ -195,25 +234,21 @@ class DecompressAlgorithm():
 
 				num_bits = code_entry.u8_1
 
-				# Compressed files appear to be padded to multiples of four, so don't copy any trailing null bytes
-				if len(self.unpacked_data) < self.write_address + amt_to_copy:
-					amt_to_copy = len(self.unpacked_data) - self.write_address
+				if unpacked_data_size < write_address + amt_to_copy:
+					amt_to_copy = unpacked_data_size - write_address
 
-				bytes_to_copy = self.stream_data[self.file_pointer:self.file_pointer + amt_to_copy]
+				bytes_to_copy = block_bytes[file_pointer:file_pointer + amt_to_copy]
 
 				for b in bytes_to_copy:
-					self.unpacked_data[self.write_address] = b
-					self.write_address += 1
-					self.file_pointer += 1
+					unpacked_block[write_address] = b
+					write_address += 1
+					file_pointer += 1
 
 			# cmd type 1: copy one byte from the input file to the allocated memory
 			else:
-				self.unpacked_data[self.write_address] = ord(self.stream_data[self.file_pointer:self.file_pointer + 1])
-				self.write_address += 1
-				self.file_pointer += 1
-
-			if self.write_address % 0x4000 == 0:
-				return
+				unpacked_block[write_address] = ord(block_bytes[file_pointer:file_pointer + 1])
+				write_address += 1
+				file_pointer += 1
 
 	def u32_get_next_bits(self, n):
 		if n <= 0:
@@ -225,7 +260,6 @@ class DecompressAlgorithm():
 		curr_dword_bit_pos = self.curr_dword_bit_pos
 
 		if curr_dword_bit_pos:
-			# determines whether or not [at least] the rest of curr_dword is being returned
 			some_bool = n >= 32 - curr_dword_bit_pos
 
 			if n <= 32 - curr_dword_bit_pos:
@@ -259,7 +293,7 @@ class DecompressAlgorithm():
 
 				dword_remainder = self.dword_remainder
 
-				self.curr_dword = self.get_uint32()
+				self.curr_dword = self.get_uint32(self.block_buffer)
 				self.dword_remainder = v15
 
 				next_bits = v14 | (dword_remainder >> some_bits)
@@ -267,7 +301,7 @@ class DecompressAlgorithm():
 		else:
 			if n == 32:
 				next_bits = self.curr_dword
-				self.curr_dword = self.get_uint32()
+				self.curr_dword = self.get_uint32(self.block_buffer)
 
 			else:
 				remaining_dword_bits = 32 - n
@@ -275,7 +309,7 @@ class DecompressAlgorithm():
 				next_bits = 0xFFFFFFFF & (self.curr_dword << remaining_dword_bits)
 
 				self.dword_remainder = self.curr_dword ^ (next_bits >> remaining_dword_bits)
-				self.curr_dword = self.get_uint32()
+				self.curr_dword = self.get_uint32(self.block_buffer)
 				self.curr_dword_bit_pos = n
 
 		return next_bits
@@ -345,7 +379,7 @@ class CodeTable():
 
 		self.update_reference_list()
 
-	# also from cpr_tclCodeTable::vSetStandardTable
+	# Also from cpr_tclCodeTable::vSetStandardTable
 	def get_entries(self, table_type):
 		if table_type == 0:
 			return [
@@ -435,8 +469,10 @@ class CodeTableEntry():
 		self.u8_2     = args[6] # [20]
 
 def main(argc, argv):
+	script_name = os.path.basename(argv[0])
+
 	if argc < 2:
-		print(f"Usage: {argv[0]} <filepath> [<filepath> ...]")
+		print(f"Usage: {script_name} <filepath> [<filepath> ...]")
 		return 1
 
 	paths = argv[1:]
@@ -444,12 +480,11 @@ def main(argc, argv):
 	if paths[0] == "all":
 		paths = os.listdir(os.getcwd())
 
+	decompressor = DecompressAlgorithm()
+
 	for file_path in paths:
-		print(f"reading file: {file_path}\n")
-
-		decompressor = DecompressAlgorithm()
-
-		decompressor.decompress(file_path)
+		if file_path != script_name and os.path.isfile(file_path):
+			decompressor.decompress(file_path)
 
 	return 0
 
