@@ -136,7 +136,7 @@ class DecompressAlgorithm():
 
 		self.block_buffer.seek(0)
 
-		# Read first four bytes of block into for u32_get_next_bits method.
+		# Read first four bytes of block into memory for u32_get_next_bits method.
 		self.curr_dword = self.get_uint32(self.block_buffer)
 
 		# TO-DO: figure out when/why 32-bit values are used here.
